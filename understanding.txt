@@ -1,0 +1,104 @@
+1. how tcn works?
+    ] tcn inspired by cnn in their working but for temporal tasks rather than spatial . 
+    ] powerfull beacuse they can have larger receptive fields cheaply/without much computitaional  through the use of dilation where the current time step tn, has a longer context of t0 - tn-1
+    
+    }Architecture:
+        ]uses block type arch 
+        ]each block contains ip->res->conv1->batchNorm->relu->dropout->conv2->batchNorm->relu->dropout->output to next block op
+        ]ip to next block=res(optional)+op (this ensures that input features are preserved as well which can be learnt by deeper layers)
+        ]it is the final timestep output we need at the last block beacuse it would have all the important info about the entire past sample including it.
+        ]causal makes sure that only past affects the future
+        ]dilation skips over time step to model global/complex non-imeediae neighbour patterns
+
+    }what they cant do?
+        ]just like any nn they are not scale varient , in the sense their output is not just depended on the patterns seen in the training dt but also the scale . why does scale matter because it is through them the weights , biasesare learnt . so wtgs,biases,gamma,beeta are both pattern and scale depended. (gamma and beta are hyperparameters used in batch norm)
+         ex: f(x) != f(x+c) c= constant shift in the input values
+        ] Now when the scale changes the learnt pattern is of no use beacuse they simlpy produce wrong answers. say , the approximation /mapping that nn do say 
+            f(x)=g(x-20)  meaning the model learnt that the trainied dataset scale is say centered arounf 20 this is just for mean , it might do it for std , kurtosis , skewness . 
+
+            now that x=x+c  , c=10 (say)
+            f(x)=g(x+c-20)= g(x-10) which is wrong . 
+
+            >The input projection weights/biases were fitted for range [20-35], so values like 48 produce features of the wrong magnitude
+            >BatchNorm stored running_mean and running_variance from training — these are wrong for the new regime
+            >ReLU activation patterns change — different neurons fire/die
+            >All of this compounds through multiple layers
+
+            the learnt weights wont work here , to change it we should change / modify the learnt variables but how . one of the ways is to re-train the model for this new shift -> but good luck dealing with model forgetting what it has learnt or smartly train the model initailly itself to model different regimes . make the prediction head see the same scale of input that it used to see but also make sure that the correct ouptut is what is produced by it . MAKE IT HANDLE MANY REGIMES LIKE THAT . 
+
+2. RA-tcn
+    ]shift detector : find the stat for the input : just the stat dont compare them with some threshols to fit/classify them into regimes yet , beacuse finding these thresholds is not going to easy and even feasible/reliable , small changes above or below the regime the entire output can be wrong . so this is risky
+    ]shift_embed : The stats ARE already numbers/tensors. The reason for the MLP is:
+
+    The raw stats [mean=4.6, std=0.8, skew=-0.3, kurt=-0.8] are in different scales (mean can be 0-50, std is 0-5, skew is -2 to 2). The MLP learns to combine them into a unified representation where similar regimes are close together and different regimes are far apart. It's not about "encoding for the model" it's about learning a useful combination of the stats.
+
+    ]memory bank: comapare the embedding with learnt embedding for the regimes and do cosine similarity , how this is learnt through training update these regime_prototype_vectors though backprop . finally apply softmax to convert the cosine_similarity_score into probobilties . Now it is classified
+    ]How much can we rely on the learnt regime_prototype_vectors because they might not be correct all the time , what if a new regime comes in , here we are trying to convert/tranform the input regime into a know regime beacuse they are very close and we are reducing the noise in here , but we cant completey transform them beacuse the true/original input also matters right , so we do AUTOCORRECT final_shift_embed=0.9*shift_embed+0.1*(classified regime embed)
+    ] FILM : FiLM does NOT scale the input. It scales the intermediate features inside the network (the output of Conv+BatchNorm layers). The raw input [4.8, 5.2, 3.1, ...] goes through the conv filters unchanged. It's the features AFTER the convolutions that get adjusted by feature * (1 + gamma) + beta.
+
+         The shift_embed doesn't touch the input at all. It flows as a side channel into the FiLM layers which sit between BatchNorm and ReLU inside each block.
+    
+
+3.Benefits
+    ]with this we can rely on the model to produce valid/correct output even when the regime/scale shifts but the pattern is almost same .
+    ]highly useful in stock market price prediction , temperature predictions and others. 
+    ] No further training required , just train it on possible regimes initially itself .cant we just do the same I mean all different regime dataset training for the vanialla tcn , wouldnt it work -> no why beacuse the tcn expects (
+        It partially works but not as well because:
+
+        When Vanilla TCN trains on Regime A (mean=0) and Regime B (mean=3) together, the conv filters have to learn one set of weights that works for both. This forces a compromise  the filters can't be optimal for either regime. They become "jack of all trades, master of none."
+
+        The BatchNorm layer will compute a global running mean and variance averaged across all regimes. This global average doesn't match ANY individual regime well.
+
+        RA-TCN avoids this compromise. The conv filters can specialize for one scale (say the average), and then FiLM corrects per-regime at inference time. The filters learn patterns, FiLM handles scale thus separation of concerns is done here.
+    ) , nn are not scale invarient unless we train it to do so . 
+    / question - how does the model make sure that the output is correct - ratcn even after making the input embed look-a-like the trained one : 
+        "how does RA-TCN make sure the output is correct?"
+
+            The answer: it's trained end-to-end with backpropagation. During training:
+
+            1.  Input from Regime B goes in
+            2.  ShiftDetector computes stats → shift_embed
+            3.  fiLM uses shift_embed to produce gamma/beta
+            4.  Prediction comes out
+            5.  Features get modulated
+            6.  MSE loss is computed against the TRUE next values
+            7.  Backprop flows through everything — the FiLM weights, the shift detector MLP, the memory bank prototypes, AND the conv weights
+
+
+            So the FiLM weights are optimized specifically so that the gamma/beta they produce for Regime B's shift_embed lead to correct predictions for Regime B data. It's not that we manually designed the correction the network learned what correction to apply by minimizing prediction error across all regimes during training.
+
+
+
+finalae: 
+
+]he input embeding is not being scaled to the ones in the trained ones but the interal features are updated to make sure the they look-a-like the ones in the trained set . the activation from relu , the outputs of batchnorm , beta and gamma 
+
+
+answer/explanation
+
+Raw input [4.8, 5.2, 3.1, ...]
+    │
+    ▼ Conv filter (UNCHANGED — same weights regardless of regime)
+    ▼ BatchNorm   (UNCHANGED — same stored running stats)
+    │
+    ├── HERE is where features are wrong for a new regime
+    │   Values are too large / too small / wrong sign
+    │
+    ▼ FiLM: feature * (1 + gamma) + beta    ← THIS fixes them
+    │
+    ├── NOW features look like what the network saw during training
+    │
+    ▼ ReLU    ← correct neurons fire/die because features are in the right range
+    ▼ ...next layers...
+    ▼ Prediction head  ← sees familiar feature magnitudes → correct output
+
+
+So when you said "the activation from relu, the outputs of batchnorm, beta and gamma final thingy" — yes, but let me be exact about the order:
+
+    ]BatchNorm output is still wrong (it uses stored stats from training)
+    ]FiLM gamma/beta correct that wrong output
+    ]ReLU then fires on the corrected values — so the right neurons activate
+    ]This propagates correctly through all remaining layers
+
+
+FiLM sits between BatchNorm and ReLU — it's fixing the damage before ReLU makes irreversible decisions (since ReLU kills negatives permanently, if the wrong values are negative, that information is lost forever).

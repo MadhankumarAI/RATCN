@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/Scripts/python make_ratcn_diagram.py)"
+    ]
+  }
+}
